@@ -37,12 +37,12 @@ function getTransporter(settings) {
 }
 
 // Check and reset daily counter if calendar day changed
-function checkDailyReset(settings) {
+async function checkDailyReset(settings) {
   const today = new Date().toDateString();
   if (today !== lastResetDate) {
     emailsSentToday = 0;
     lastResetDate = today;
-    db.addLog({
+    await db.addLog({
       type: 'info',
       message: 'Daily email counter reset to 0.'
     });
@@ -50,7 +50,7 @@ function checkDailyReset(settings) {
 }
 
 // Custom Rule-Based Personalization Fallback
-function applyRuleBasedPersonalization(template, influencer) {
+async function applyRuleBasedPersonalization(template, influencer) {
   let content = template;
   
   // Custom opening hook based on niche and platform
@@ -91,7 +91,7 @@ function applyRuleBasedPersonalization(template, influencer) {
   }
 
   // Retrieve current settings for Brand variable substitutions
-  const settings = db.getSettings();
+  const settings = await db.getSettings();
 
   // Replace placeholders
   content = content.replace(/\{\{Name\}\}/gi, influencer.name || 'there');
@@ -173,196 +173,201 @@ async function processQueueStep() {
   if (isProcessing) return;
   isProcessing = true;
 
-  const settings = db.getSettings();
-  checkDailyReset(settings);
-
-  // Check if daily limit reached
-  if (emailsSentToday >= settings.emailsPerDayLimit) {
-    db.addLog({
-      type: 'warning',
-      message: `Daily sending limit of ${settings.emailsPerDayLimit} emails reached. Pausing queue.`
-    });
-    stopQueueProcessor();
-    isProcessing = false;
-    return;
-  }
-
-  const queue = db.getQueue();
-  const pendingItems = queue.filter(item => item.status === 'pending');
-
-  if (pendingItems.length === 0) {
-    // Check if any campaigns should be completed
-    const campaigns = db.getCampaigns();
-    let updatedCampaign = false;
-    campaigns.forEach(campaign => {
-      if (campaign.status === 'active') {
-        const campQueue = queue.filter(q => q.campaignId === campaign.id);
-        const campPending = campQueue.filter(q => q.status === 'pending' || q.status === 'sending');
-        if (campQueue.length > 0 && campPending.length === 0) {
-          campaign.status = 'completed';
-          updatedCampaign = true;
-          db.addLog({
-            type: 'info',
-            message: `Campaign "${campaign.name}" completed successfully.`
-          });
-        }
-      }
-    });
-    if (updatedCampaign) {
-      db.saveCampaigns(campaigns);
-    }
-    
-    stopQueueProcessor();
-    isProcessing = false;
-    return;
-  }
-
-  // Sort queue by scheduled time
-  const now = new Date();
-  const nextItem = pendingItems
-    .filter(item => new Date(item.scheduledTime) <= now)
-    .sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime))[0];
-
-  if (!nextItem) {
-    // No item scheduled for now yet
-    isProcessing = false;
-    return;
-  }
-
-  // Start sending nextItem
-  nextItem.status = 'sending';
-  db.saveQueue(queue);
-
-  const influencerList = db.getInfluencers();
-  const influencer = influencerList.find(i => i.id === nextItem.influencerId);
-  const campaigns = db.getCampaigns();
-  const campaign = campaigns.find(c => c.id === nextItem.campaignId);
-
-  if (!influencer || !campaign) {
-    nextItem.status = 'failed';
-    nextItem.error = 'Influencer or Campaign no longer exists';
-    db.saveQueue(queue);
-    isProcessing = false;
-    return;
-  }
-
-  // Update influencer status to sending
-  db.updateInfluencerStatus(influencer.id, 'sending');
-
   try {
-    let finalBody = nextItem.personalizedBody;
-    // If not generated yet (or needs update), personalize now
-    if (!finalBody) {
-      if (settings.aiPersonalizationEnabled) {
-        finalBody = await applyAIPersonalization(campaign.bodyTemplate, influencer, settings);
-      } else {
-        finalBody = applyRuleBasedPersonalization(campaign.bodyTemplate, influencer);
-      }
-      nextItem.personalizedBody = finalBody;
-    }
-    
-    let finalSubject = nextItem.personalizedSubject;
-    if (!finalSubject) {
-      finalSubject = applyRuleBasedPersonalization(campaign.subjectTemplate, influencer);
-      nextItem.personalizedSubject = finalSubject;
+    const settings = await db.getSettings();
+    await checkDailyReset(settings);
+
+    // Check if daily limit reached
+    if (emailsSentToday >= settings.emailsPerDayLimit) {
+      await db.addLog({
+        type: 'warning',
+        message: `Daily sending limit of ${settings.emailsPerDayLimit} emails reached. Pausing queue.`
+      });
+      stopQueueProcessor();
+      isProcessing = false;
+      return;
     }
 
-    if (settings.sandboxMode) {
-      // Simulate successful send
-      setTimeout(() => {
+    const queue = await db.getQueue();
+    const pendingItems = queue.filter(item => item.status === 'pending');
+
+    if (pendingItems.length === 0) {
+      // Check if any campaigns should be completed
+      const campaigns = await db.getCampaigns();
+      let updatedCampaign = false;
+      campaigns.forEach(campaign => {
+        if (campaign.status === 'active') {
+          const campQueue = queue.filter(q => q.campaignId === campaign.id);
+          const campPending = campQueue.filter(q => q.status === 'pending' || q.status === 'sending');
+          if (campQueue.length > 0 && campPending.length === 0) {
+            campaign.status = 'completed';
+            updatedCampaign = true;
+            db.addLog({
+              type: 'info',
+              message: `Campaign "${campaign.name}" completed successfully.`
+            });
+          }
+        }
+      });
+      if (updatedCampaign) {
+        await db.saveCampaigns(campaigns);
+      }
+      
+      stopQueueProcessor();
+      isProcessing = false;
+      return;
+    }
+
+    // Sort queue by scheduled time
+    const now = new Date();
+    const nextItem = pendingItems
+      .filter(item => new Date(item.scheduledTime) <= now)
+      .sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime))[0];
+
+    if (!nextItem) {
+      // No item scheduled for now yet
+      isProcessing = false;
+      return;
+    }
+
+    // Start sending nextItem
+    nextItem.status = 'sending';
+    await db.saveQueue(queue);
+
+    const influencerList = await db.getInfluencers();
+    const influencer = influencerList.find(i => i.id === nextItem.influencerId);
+    const campaigns = await db.getCampaigns();
+    const campaign = campaigns.find(c => c.id === nextItem.campaignId);
+
+    if (!influencer || !campaign) {
+      nextItem.status = 'failed';
+      nextItem.error = 'Influencer or Campaign no longer exists';
+      await db.saveQueue(queue);
+      isProcessing = false;
+      return;
+    }
+
+    // Update influencer status to sending
+    await db.updateInfluencerStatus(influencer.id, 'sending');
+
+    try {
+      let finalBody = nextItem.personalizedBody;
+      // If not generated yet (or needs update), personalize now
+      if (!finalBody) {
+        if (settings.aiPersonalizationEnabled) {
+          finalBody = await applyAIPersonalization(campaign.bodyTemplate, influencer, settings);
+        } else {
+          finalBody = await applyRuleBasedPersonalization(campaign.bodyTemplate, influencer);
+        }
+        nextItem.personalizedBody = finalBody;
+      }
+      
+      let finalSubject = nextItem.personalizedSubject;
+      if (!finalSubject) {
+        finalSubject = await applyRuleBasedPersonalization(campaign.subjectTemplate, influencer);
+        nextItem.personalizedSubject = finalSubject;
+      }
+
+      if (settings.sandboxMode) {
+        // Simulate successful send
+        setTimeout(async () => {
+          nextItem.status = 'sent';
+          nextItem.sentTime = new Date().toISOString();
+          await db.saveQueue(queue);
+
+          await db.updateInfluencerStatus(influencer.id, 'sent');
+          
+          // Update campaign counters
+          campaign.sentCount += 1;
+          await db.saveCampaigns(campaigns);
+
+          emailsSentToday += 1;
+          
+          await db.addLog({
+            type: 'success',
+            message: `[SANDBOX] Email successfully simulated to ${influencer.name} (${influencer.email}) for Campaign: "${campaign.name}"`
+          });
+          
+          isProcessing = false;
+        }, 500);
+      } else {
+        // Real email send
+        const transporter = getTransporter(settings);
+        if (!transporter) {
+          throw new Error('SMTP credentials not configured or transporter creation failed.');
+        }
+
+        const mailOptions = {
+          from: settings.smtpFrom || process.env.SMTP_FROM,
+          to: influencer.email,
+          subject: finalSubject,
+          text: finalBody
+        };
+
+        const info = await transporter.sendMail(mailOptions);
+        
         nextItem.status = 'sent';
         nextItem.sentTime = new Date().toISOString();
-        db.saveQueue(queue);
+        await db.saveQueue(queue);
 
-        db.updateInfluencerStatus(influencer.id, 'sent');
-        
-        // Update campaign counters
+        await db.updateInfluencerStatus(influencer.id, 'sent');
+
         campaign.sentCount += 1;
-        db.saveCampaigns(campaigns);
+        await db.saveCampaigns(campaigns);
 
         emailsSentToday += 1;
-        
-        db.addLog({
+
+        await db.addLog({
           type: 'success',
-          message: `[SANDBOX] Email successfully simulated to ${influencer.name} (${influencer.email}) for Campaign: "${campaign.name}"`
+          message: `Email sent to ${influencer.name} (${influencer.email}). MsgID: ${info.messageId}`
         });
-        
+
         isProcessing = false;
-      }, 500);
-    } else {
-      // Real email send
-      const transporter = getTransporter(settings);
-      if (!transporter) {
-        throw new Error('SMTP credentials not configured or transporter creation failed.');
       }
+    } catch (err) {
+      console.error('Failed to send email:', err);
+      nextItem.status = 'failed';
+      nextItem.error = err.message;
+      await db.saveQueue(queue);
 
-      const mailOptions = {
-        from: settings.smtpFrom || process.env.SMTP_FROM,
-        to: influencer.email,
-        subject: finalSubject,
-        text: finalBody
-      };
+      await db.updateInfluencerStatus(influencer.id, 'failed');
 
-      const info = await transporter.sendMail(mailOptions);
-      
-      nextItem.status = 'sent';
-      nextItem.sentTime = new Date().toISOString();
-      db.saveQueue(queue);
+      campaign.failedCount += 1;
+      await db.saveCampaigns(campaigns);
 
-      db.updateInfluencerStatus(influencer.id, 'sent');
-
-      campaign.sentCount += 1;
-      db.saveCampaigns(campaigns);
-
-      emailsSentToday += 1;
-
-      db.addLog({
-        type: 'success',
-        message: `Email sent to ${influencer.name} (${influencer.email}). MsgID: ${info.messageId}`
+      await db.addLog({
+        type: 'error',
+        message: `Failed sending to ${influencer.name} (${influencer.email}): ${err.message}`
       });
 
       isProcessing = false;
     }
-  } catch (err) {
-    console.error('Failed to send email:', err);
-    nextItem.status = 'failed';
-    nextItem.error = err.message;
-    db.saveQueue(queue);
-
-    db.updateInfluencerStatus(influencer.id, 'failed');
-
-    campaign.failedCount += 1;
-    db.saveCampaigns(campaigns);
-
-    db.addLog({
-      type: 'error',
-      message: `Failed sending to ${influencer.name} (${influencer.email}): ${err.message}`
-    });
-
+  } catch (error) {
+    console.error('Queue processor error:', error);
     isProcessing = false;
   }
 }
 
 // Start Background Queue Processor
-function startQueueProcessor() {
+async function startQueueProcessor() {
   if (queueIntervalId) return;
 
-  const settings = db.getSettings();
+  const settings = await db.getSettings();
   // Average interval check (e.g. check every 3 seconds)
   queueIntervalId = setInterval(processQueueStep, 3000);
   
-  db.addLog({
+  await db.addLog({
     type: 'info',
     message: 'Email Queue Worker started.'
   });
 }
 
 // Stop Queue Processor
-function stopQueueProcessor() {
+async function stopQueueProcessor() {
   if (queueIntervalId) {
     clearInterval(queueIntervalId);
     queueIntervalId = null;
-    db.addLog({
+    await db.addLog({
       type: 'info',
       message: 'Email Queue Worker paused/stopped.'
     });
@@ -372,13 +377,22 @@ function stopQueueProcessor() {
 // REST ENDPOINTS
 
 // Settings
-app.get('/api/settings', (req, res) => {
-  res.json(db.getSettings());
+app.get('/api/settings', async (req, res) => {
+  try {
+    const settings = await db.getSettings();
+    res.json(settings);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
 });
 
-app.post('/api/settings', (req, res) => {
-  const updated = db.saveSettings(req.body);
-  res.json(updated);
+app.post('/api/settings', async (req, res) => {
+  try {
+    const updated = await db.saveSettings(req.body);
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save settings' });
+  }
 });
 
 // Test Email Setup
@@ -389,16 +403,17 @@ app.post('/api/test-email', async (req, res) => {
     return res.status(400).json({ error: 'Recipient email is required' });
   }
 
-  const activeSettings = { ...db.getSettings(), ...settings };
-  
-  if (activeSettings.sandboxMode) {
-    return res.json({ 
-      success: true, 
-      message: '[SANDBOX] Test email generated and logged successfully (no network transmission).'
-    });
-  }
-
   try {
+    const dbSettings = await db.getSettings();
+    const activeSettings = { ...dbSettings, ...settings };
+    
+    if (activeSettings.sandboxMode) {
+      return res.json({ 
+        success: true, 
+        message: '[SANDBOX] Test email generated and logged successfully (no network transmission).'
+      });
+    }
+
     const transporter = nodemailer.createTransport({
       host: activeSettings.smtpHost,
       port: parseInt(activeSettings.smtpPort),
@@ -423,261 +438,332 @@ app.post('/api/test-email', async (req, res) => {
 });
 
 // Influencers
-app.get('/api/influencers', (req, res) => {
-  res.json(db.getInfluencers());
+app.get('/api/influencers', async (req, res) => {
+  try {
+    const influencers = await db.getInfluencers();
+    res.json(influencers);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch influencers' });
+  }
 });
 
-app.post('/api/influencers', (req, res) => {
-  const influencer = db.addInfluencer(req.body);
-  res.status(201).json(influencer);
+app.post('/api/influencers', async (req, res) => {
+  try {
+    const influencer = await db.addInfluencer(req.body);
+    res.status(201).json(influencer);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to add influencer' });
+  }
 });
 
-app.post('/api/influencers/import', (req, res) => {
+app.post('/api/influencers/import', async (req, res) => {
   const items = req.body; // Array of influencers
   if (!Array.isArray(items)) {
     return res.status(400).json({ error: 'Body must be an array of influencers' });
   }
   
-  const importedList = [];
-  const currentList = db.getInfluencers();
+  try {
+    const importedList = [];
+    const currentList = await db.getInfluencers();
 
-  items.forEach(item => {
-    // Avoid double adding exact emails in same session
-    if (item.email) {
-      const exists = currentList.some(i => i.email.toLowerCase() === item.email.toLowerCase());
-      if (!exists) {
-        const newInf = {
-          id: 'inf_' + Date.now() + Math.random().toString(36).substring(2, 7),
-          name: item.name || 'N/A',
-          email: item.email,
-          niche: item.niche || 'General',
-          platform: item.platform || 'Instagram',
-          followers: item.followers || '0',
-          engagement: item.engagement || '0%',
-          notes: item.notes || '',
-          status: 'idle',
-          createdAt: new Date().toISOString()
-        };
-        currentList.push(newInf);
-        importedList.push(newInf);
+    items.forEach(item => {
+      // Avoid double adding exact emails in same session
+      if (item.email) {
+        const exists = currentList.some(i => i.email.toLowerCase() === item.email.toLowerCase());
+        if (!exists) {
+          const newInf = {
+            id: 'inf_' + Date.now() + Math.random().toString(36).substring(2, 7),
+            name: item.name || 'N/A',
+            email: item.email,
+            niche: item.niche || 'General',
+            platform: item.platform || 'Instagram',
+            followers: item.followers || '0',
+            engagement: item.engagement || '0%',
+            notes: item.notes || '',
+            status: 'idle',
+            createdAt: new Date().toISOString()
+          };
+          currentList.push(newInf);
+          importedList.push(newInf);
+        }
       }
-    }
-  });
+    });
 
-  db.saveInfluencers(currentList);
-  db.addLog({
-    type: 'success',
-    message: `Imported ${importedList.length} new influencers successfully from list.`
-  });
-  
-  res.json({ success: true, count: importedList.length, imported: importedList });
+    await db.saveInfluencers(currentList);
+    await db.addLog({
+      type: 'success',
+      message: `Imported ${importedList.length} new influencers successfully from list.`
+    });
+    
+    res.json({ success: true, count: importedList.length, imported: importedList });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to import influencers' });
+  }
 });
 
-app.delete('/api/influencers', (req, res) => {
-  db.saveInfluencers([]);
-  res.json({ success: true, message: 'All influencers cleared.' });
+app.delete('/api/influencers', async (req, res) => {
+  try {
+    await db.saveInfluencers([]);
+    res.json({ success: true, message: 'All influencers cleared.' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to clear influencers' });
+  }
 });
 
-app.delete('/api/influencers/:id', (req, res) => {
-  const list = db.getInfluencers();
-  const filtered = list.filter(i => i.id !== req.params.id);
-  db.saveInfluencers(filtered);
-  res.json({ success: true });
+app.delete('/api/influencers/:id', async (req, res) => {
+  try {
+    const list = await db.getInfluencers();
+    const filtered = list.filter(i => i.id !== req.params.id);
+    await db.saveInfluencers(filtered);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete influencer' });
+  }
 });
 
 // Campaigns
-app.get('/api/campaigns', (req, res) => {
-  res.json(db.getCampaigns());
+app.get('/api/campaigns', async (req, res) => {
+  try {
+    const campaigns = await db.getCampaigns();
+    res.json(campaigns);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch campaigns' });
+  }
 });
 
-app.post('/api/campaigns', (req, res) => {
-  const campaign = db.createCampaign(req.body);
-  res.status(201).json(campaign);
+app.post('/api/campaigns', async (req, res) => {
+  try {
+    const campaign = await db.createCampaign(req.body);
+    res.status(201).json(campaign);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create campaign' });
+  }
 });
 
 // Start campaign (queue up emails for influencers matching criteria)
 app.post('/api/campaigns/:id/start', async (req, res) => {
   const campaignId = req.params.id;
-  const campaigns = db.getCampaigns();
-  const campaign = campaigns.find(c => c.id === campaignId);
+  
+  try {
+    const campaigns = await db.getCampaigns();
+    const campaign = campaigns.find(c => c.id === campaignId);
 
-  if (!campaign) {
-    return res.status(404).json({ error: 'Campaign not found' });
-  }
-
-  if (campaign.status === 'active') {
-    return res.json({ success: true, message: 'Campaign is already running.' });
-  }
-
-  // Get idle influencers
-  const influencers = db.getInfluencers();
-  const idleInfluencers = influencers.filter(i => i.status === 'idle' || i.status === 'failed');
-
-  if (idleInfluencers.length === 0) {
-    return res.status(400).json({ error: 'No idle or failed influencers available to queue.' });
-  }
-
-  const settings = db.getSettings();
-  campaign.status = 'active';
-  campaign.totalCount = campaign.sentCount + idleInfluencers.length;
-  db.saveCampaigns(campaigns);
-
-  // Queue up emails with scheduled times staggered
-  const now = new Date();
-  let schedulePointer = new Date(now.getTime() + 1000); // Start 1s from now
-
-  for (let idx = 0; idx < idleInfluencers.length; idx++) {
-    const inf = idleInfluencers[idx];
-    
-    // Personalize content
-    let subject = applyRuleBasedPersonalization(campaign.subjectTemplate, inf);
-    let body = '';
-    
-    // Pre-generate rule-based personalization. If AI is enabled, worker generates it when processing to avoid UI lag.
-    if (!settings.aiPersonalizationEnabled) {
-      body = applyRuleBasedPersonalization(campaign.bodyTemplate, inf);
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
     }
 
-    db.addToQueue({
-      influencerId: inf.id,
-      campaignId: campaign.id,
-      personalizedSubject: subject,
-      personalizedBody: body, // empty means worker will compute it dynamically
-      scheduledTime: schedulePointer.toISOString()
+    if (campaign.status === 'active') {
+      return res.json({ success: true, message: 'Campaign is already running.' });
+    }
+
+    // Get idle influencers
+    const influencers = await db.getInfluencers();
+    const idleInfluencers = influencers.filter(i => i.status === 'idle' || i.status === 'failed');
+
+    if (idleInfluencers.length === 0) {
+      return res.status(400).json({ error: 'No idle or failed influencers available to queue.' });
+    }
+
+    const settings = await db.getSettings();
+    campaign.status = 'active';
+    campaign.totalCount = campaign.sentCount + idleInfluencers.length;
+    await db.saveCampaigns(campaigns);
+
+    // Queue up emails with scheduled times staggered
+    const now = new Date();
+    let schedulePointer = new Date(now.getTime() + 1000); // Start 1s from now
+
+    for (let idx = 0; idx < idleInfluencers.length; idx++) {
+      const inf = idleInfluencers[idx];
+      
+      // Personalize content
+      let subject = await applyRuleBasedPersonalization(campaign.subjectTemplate, inf);
+      let body = '';
+      
+      // Pre-generate rule-based personalization. If AI is enabled, worker generates it when processing to avoid UI lag.
+      if (!settings.aiPersonalizationEnabled) {
+        body = await applyRuleBasedPersonalization(campaign.bodyTemplate, inf);
+      }
+
+      await db.addToQueue({
+        influencerId: inf.id,
+        campaignId: campaign.id,
+        personalizedSubject: subject,
+        personalizedBody: body, // empty means worker will compute it dynamically
+        scheduledTime: schedulePointer.toISOString()
+      });
+
+      await db.updateInfluencerStatus(inf.id, 'queued');
+
+      // Stagger scheduling by random delay
+      const delay = Math.floor(Math.random() * (settings.maxDelaySeconds - settings.minDelaySeconds + 1)) + settings.minDelaySeconds;
+      schedulePointer = new Date(schedulePointer.getTime() + delay * 1000);
+    }
+
+    // Start background worker loop
+    await startQueueProcessor();
+
+    await db.addLog({
+      type: 'info',
+      message: `Campaign "${campaign.name}" activated. ${idleInfluencers.length} emails added to queue.`
     });
 
-    db.updateInfluencerStatus(inf.id, 'queued');
-
-    // Stagger scheduling by random delay
-    const delay = Math.floor(Math.random() * (settings.maxDelaySeconds - settings.minDelaySeconds + 1)) + settings.minDelaySeconds;
-    schedulePointer = new Date(schedulePointer.getTime() + delay * 1000);
+    res.json({ success: true, campaign });
+  } catch (error) {
+    console.error('Error starting campaign:', error);
+    res.status(500).json({ error: 'Failed to start campaign' });
   }
-
-  // Start background worker loop
-  startQueueProcessor();
-
-  db.addLog({
-    type: 'info',
-    message: `Campaign "${campaign.name}" activated. ${idleInfluencers.length} emails added to queue.`
-  });
-
-  res.json({ success: true, campaign });
 });
 
 // Pause Campaign
-app.post('/api/campaigns/:id/pause', (req, res) => {
+app.post('/api/campaigns/:id/pause', async (req, res) => {
   const campaignId = req.params.id;
-  const campaigns = db.getCampaigns();
-  const campaign = campaigns.find(c => c.id === campaignId);
-
-  if (!campaign) {
-    res.status(404).json({ error: 'Campaign not found' });
-    return;
-  }
-
-  campaign.status = 'paused';
-  db.saveCampaigns(campaigns);
-
-  // Remove pending queue items for this campaign, set influencers status back to idle
-  const queue = db.getQueue();
-  const queueItems = queue.filter(item => item.campaignId === campaignId && item.status === 'pending');
   
-  queueItems.forEach(item => {
-    item.status = 'failed';
-    item.error = 'Campaign paused by user';
-    db.updateInfluencerStatus(item.influencerId, 'idle');
-  });
-  db.saveQueue(queue);
+  try {
+    const campaigns = await db.getCampaigns();
+    const campaign = campaigns.find(c => c.id === campaignId);
 
-  db.addLog({
-    type: 'info',
-    message: `Campaign "${campaign.name}" paused. Cleared ${queueItems.length} pending items from active dispatch.`
-  });
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
 
-  res.json({ success: true, campaign });
+    campaign.status = 'paused';
+    await db.saveCampaigns(campaigns);
+
+    // Remove pending queue items for this campaign, set influencers status back to idle
+    const queue = await db.getQueue();
+    const queueItems = queue.filter(item => item.campaignId === campaignId && item.status === 'pending');
+    
+    for (const item of queueItems) {
+      item.status = 'failed';
+      item.error = 'Campaign paused by user';
+      await db.updateInfluencerStatus(item.influencerId, 'idle');
+    }
+    await db.saveQueue(queue);
+
+    await db.addLog({
+      type: 'info',
+      message: `Campaign "${campaign.name}" paused. Cleared ${queueItems.length} pending items from active dispatch.`
+    });
+
+    res.json({ success: true, campaign });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to pause campaign' });
+  }
 });
 
-app.delete('/api/campaigns/:id', (req, res) => {
-  const campaigns = db.getCampaigns();
-  const filtered = campaigns.filter(c => c.id !== req.params.id);
-  db.saveCampaigns(filtered);
-  
-  // Clean queue
-  const queue = db.getQueue();
-  const cleanQueue = queue.filter(q => q.campaignId !== req.params.id);
-  db.saveQueue(cleanQueue);
+app.delete('/api/campaigns/:id', async (req, res) => {
+  try {
+    const campaigns = await db.getCampaigns();
+    const filtered = campaigns.filter(c => c.id !== req.params.id);
+    await db.saveCampaigns(filtered);
+    
+    // Clean queue
+    const queue = await db.getQueue();
+    const cleanQueue = queue.filter(q => q.campaignId !== req.params.id);
+    await db.saveQueue(cleanQueue);
 
-  res.json({ success: true });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete campaign' });
+  }
 });
 
 // Queue
-app.get('/api/queue', (req, res) => {
-  res.json(db.getQueue());
+app.get('/api/queue', async (req, res) => {
+  try {
+    const queue = await db.getQueue();
+    res.json(queue);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch queue' });
+  }
 });
 
-app.delete('/api/queue/clear', (req, res) => {
-  db.saveQueue([]);
-  // Reset influencers status
-  const influencers = db.getInfluencers();
-  influencers.forEach(i => {
-    if (i.status === 'queued' || i.status === 'sending') {
-      i.status = 'idle';
-    }
-  });
-  db.saveInfluencers(influencers);
+app.delete('/api/queue/clear', async (req, res) => {
+  try {
+    await db.saveQueue([]);
+    // Reset influencers status
+    const influencers = await db.getInfluencers();
+    influencers.forEach(i => {
+      if (i.status === 'queued' || i.status === 'sending') {
+        i.status = 'idle';
+      }
+    });
+    await db.saveInfluencers(influencers);
 
-  // Mark active campaigns as paused
-  const campaigns = db.getCampaigns();
-  campaigns.forEach(c => {
-    if (c.status === 'active') {
-      c.status = 'paused';
-    }
-  });
-  db.saveCampaigns(campaigns);
+    // Mark active campaigns as paused
+    const campaigns = await db.getCampaigns();
+    campaigns.forEach(c => {
+      if (c.status === 'active') {
+        c.status = 'paused';
+      }
+    });
+    await db.saveCampaigns(campaigns);
 
-  stopQueueProcessor();
+    stopQueueProcessor();
 
-  db.addLog({
-    type: 'info',
-    message: 'Email Queue cleared by user.'
-  });
+    await db.addLog({
+      type: 'info',
+      message: 'Email Queue cleared by user.'
+    });
 
-  res.json({ success: true });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to clear queue' });
+  }
 });
 
 // Logs
-app.get('/api/logs', (req, res) => {
-  res.json(db.getLogs());
+app.get('/api/logs', async (req, res) => {
+  try {
+    const logs = await db.getLogs();
+    res.json(logs);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch logs' });
+  }
 });
 
-app.delete('/api/logs', (req, res) => {
-  db.saveLogs([]);
-  res.json({ success: true });
+app.delete('/api/logs', async (req, res) => {
+  try {
+    await db.saveLogs([]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to clear logs' });
+  }
 });
 
 // Status of Worker
-app.get('/api/status', (req, res) => {
-  const queue = db.getQueue();
-  const pendingCount = queue.filter(q => q.status === 'pending').length;
-  const sendingCount = queue.filter(q => q.status === 'sending').length;
-  
-  res.json({
-    workerActive: queueIntervalId !== null,
-    pendingEmails: pendingCount,
-    sendingEmails: sendingCount,
-    emailsSentToday,
-    limit: db.getSettings().emailsPerDayLimit
-  });
+app.get('/api/status', async (req, res) => {
+  try {
+    const queue = await db.getQueue();
+    const pendingCount = queue.filter(q => q.status === 'pending').length;
+    const sendingCount = queue.filter(q => q.status === 'sending').length;
+    const settings = await db.getSettings();
+    
+    res.json({
+      workerActive: queueIntervalId !== null,
+      pendingEmails: pendingCount,
+      sendingEmails: sendingCount,
+      emailsSentToday,
+      limit: settings.emailsPerDayLimit
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch status' });
+  }
 });
 
 // Control Worker directly
-app.post('/api/status/toggle', (req, res) => {
-  if (queueIntervalId) {
-    stopQueueProcessor();
-  } else {
-    startQueueProcessor();
+app.post('/api/status/toggle', async (req, res) => {
+  try {
+    if (queueIntervalId) {
+      await stopQueueProcessor();
+    } else {
+      await startQueueProcessor();
+    }
+    res.json({ workerActive: queueIntervalId !== null });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to toggle worker' });
   }
-  res.json({ workerActive: queueIntervalId !== null });
 });
 
 // Serve frontend SPA
@@ -686,10 +772,17 @@ app.get('*', (req, res) => {
 });
 
 // Auto-start worker on load if active items exist
-const pendingOnLoad = db.getQueue().filter(q => q.status === 'pending').length;
-if (pendingOnLoad > 0) {
-  startQueueProcessor();
-}
+(async () => {
+  try {
+    const queue = await db.getQueue();
+    const pendingOnLoad = queue.filter(q => q.status === 'pending').length;
+    if (pendingOnLoad > 0) {
+      await startQueueProcessor();
+    }
+  } catch (error) {
+    console.error('Error on startup:', error);
+  }
+})();
 
 app.listen(PORT, () => {
   console.log(`Influencer Outreach Email Agent listening on http://localhost:${PORT}`);
